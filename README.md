@@ -1,6 +1,6 @@
 ---
 title: Talk To Documents
-emoji: 🏆
+emoji: 🤖
 colorFrom: green
 colorTo: blue
 sdk: gradio
