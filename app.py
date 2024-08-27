@@ -4,9 +4,9 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
 from langchain_huggingface.embeddings import HuggingFaceEmbeddings
 from langchain_huggingface import HuggingFaceEndpoint, ChatHuggingFace
-from langchain import hub
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnablePassthrough
+from langchain_core.prompts import ChatPromptTemplate
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain.chains import create_retrieval_chain
 
 def initialise_vectorstore(pdf, progress=gr.Progress()):
     progress(0, desc="Reading PDF")
@@ -35,8 +35,8 @@ def initialise_chain(llm, vectorstore, progress=gr.Progress()):
         repo_id=llm,
         task="text-generation",
         max_new_tokens=512,
-        do_sample=False,
-        repetition_penalty=1.03
+        top_k=4,
+        temperature=0.1
     )
 
     chat = ChatHuggingFace(
@@ -47,23 +47,36 @@ def initialise_chain(llm, vectorstore, progress=gr.Progress()):
     progress(0.5, desc="Initialising RAG Chain")
 
     retriever = vectorstore.as_retriever()
-    prompt = hub.pull("rlm/rag-prompt")
-    parser = StrOutputParser()
 
-    rag_chain = {"context": retriever, "question": RunnablePassthrough()} | prompt | chat | parser
+    system_prompt = (
+        "You are an assistant for question-answering tasks. "
+        "Use the following pieces of retrieved context to answer "
+        "the question. If you don't know the answer, say that you "
+        "don't know. Use three sentences maximum and keep the "
+        "answer concise."
+        "\n\n"
+        "{context}"
+    )
 
-    progress(1, desc="Complete")
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", system_prompt),
+            ("human", "{input}"),
+        ]
+    )
+
+    question_answer_chain = create_stuff_documents_chain(chat, prompt)
+    rag_chain = create_retrieval_chain(retriever, question_answer_chain)
+
+    progress(0.9, desc="Complete")
 
     return rag_chain, progress
 
 def send(message, rag_chain, chat_history):
-    response = rag_chain.invoke(message)
-    chat_history.append((message, response))
+    response = rag_chain.invoke({"input": message})
+    chat_history.append((message, response["answer"]))
+
     return "", chat_history
-
-def restart():
-    return f"Restarting"
-
 
 with gr.Blocks() as demo:
 
@@ -74,7 +87,6 @@ with gr.Blocks() as demo:
     gr.Markdown("<H3>Upload and ask questions about your PDF files</H3>")
     gr.Markdown("<H6>Note: This project uses LangChain to perform RAG (Retrieval Augmented Generation) on PDF files, allowing users to ask any questions related to their contents. When a PDF file is uploaded, it is embedded and stored in an in-memory Chroma vectorstore, which the chatbot uses as a source of knowledge when aswering user questions.</H6>")
 
-    # Vectorstore Tab
     with gr.Tab("Vectorstore"):
         with gr.Row():
             input_pdf = gr.File()
@@ -91,10 +103,9 @@ with gr.Blocks() as demo:
         with gr.Row():
             vectorstore_initialisation_progress = gr.Textbox(value="None", label="Initialization")
 
-    # RAG Chain
     with gr.Tab("RAG Chain"):
         with gr.Row():
-            language_model = gr.Radio(["microsoft/Phi-3-mini-4k-instruct", "mistralai/Mistral-7B-Instruct-v0.2", "nvidia/Mistral-NeMo-Minitron-8B-Base"])
+            language_model = gr.Radio(["microsoft/Phi-3-mini-4k-instruct", "mistralai/Mistral-7B-Instruct-v0.2", "HuggingFaceH4/zephyr-7b-beta", "mistralai/Mixtral-8x7B-Instruct-v0.1"])
         with gr.Row():
             with gr.Column(scale=1, min_width=0):
                 pass
@@ -108,35 +119,14 @@ with gr.Blocks() as demo:
         with gr.Row():
             chain_initialisation_progress = gr.Textbox(value="None", label="Initialization")
 
-    # Chatbot Tab
     with gr.Tab("Chatbot"):
         with gr.Row():
             chatbot = gr.Chatbot()
-        with gr.Accordion("Advanced - Document references", open=False):
-            with gr.Row():
-                doc_source1 = gr.Textbox(label="Reference 1", lines=2, container=True, scale=20)
-                source1_page = gr.Number(label="Page", scale=1)
-            with gr.Row():
-                doc_source2 = gr.Textbox(label="Reference 2", lines=2, container=True, scale=20)
-                source2_page = gr.Number(label="Page", scale=1)
-            with gr.Row():
-                doc_source3 = gr.Textbox(label="Reference 3", lines=2, container=True, scale=20)
-                source3_page = gr.Number(label="Page", scale=1)
         with gr.Row():
             message = gr.Textbox()
-        with gr.Row():
-            send_btn = gr.Button(
-                "Send",
-                variant=["primary"]
-            )
-            restart_btn = gr.Button(
-                "Restart",
-                variant=["secondary"]
-            )
 
     initialise_vectorstore_btn.click(fn=initialise_vectorstore, inputs=input_pdf, outputs=[vectorstore, vectorstore_initialisation_progress])
     initialise_chain_btn.click(fn=initialise_chain, inputs=[language_model, vectorstore], outputs=[rag_chain, chain_initialisation_progress])
-    send_btn.click(fn=send, inputs=[message, rag_chain, chatbot], outputs=[message, chatbot])
-    restart_btn.click(fn=restart)
+    message.submit(fn=send, inputs=[message, rag_chain, chatbot], outputs=[message, chatbot])
 
 demo.launch()
